@@ -59,7 +59,9 @@ uv run honk_bot.py vision --runs 10                # screenshots instead of game
 uv run honk_bot.py capture --seconds 5             # save frames to ./frames, no input
 ```
 
-While it plays, a banner across the top of the page shows that OpenAI Decisions is driving, along with each decision, its probability and its latency. A failed run saves a per-tick trace to `logs/`. `--record` saves an MP4 of the tab using Chrome's screencast and `ffmpeg`, with no OS screen-recording permission needed. To use a different Chrome address than `http://127.0.0.1:9222`, set `HONK_CDP_URL`.
+For [endless mode](https://www.reddit.com/r/honk/comments/1o7wahu/endless_mode/), open that post instead. Experiment flags: `--plan`, `--lean`, `--pass-px`, `--aim`, `--tick` and `--in-flight` (see `--help` and [docs/findings.md](docs/findings.md#7-endless-mode-in-progress)).
+
+While it plays, a banner across the top of the page shows that OpenAI Decisions is flying the goose, along with each decision, its probability and its latency. A failed run saves a per-tick trace to `logs/`. `--record` saves an MP4 of the tab using Chrome's screencast and `ffmpeg`, with no OS screen-recording permission needed. To use a different Chrome address than `http://127.0.0.1:9222`, set `HONK_CDP_URL`.
 
 The synthetic benchmarks in `benchmarks/` need only the API key: `uv run benchmarks/synthetic_flappy.py`.
 
@@ -122,7 +124,8 @@ From screenshots, the model couldn't judge fine vertical alignment. It answered 
 
 ## Limitations
 
-- **Tested on one, very easy level only:** [the easiest level you'll ever play](https://www.reddit.com/r/honk/comments/1tnt19h/the_easiest_level_youll_ever_play/), which has one pipe pair, a floor hazard and a short run to the finish. Harder levels with tighter gaps, moving obstacles or bullets haven't been tried.
+- **Endless mode is the real test, and it's in progress.** [Endless mode](https://www.reddit.com/r/honk/comments/1o7wahu/endless_mode/) has tighter gaps (~115px of room against ~180px), ramping speed, and later single, moving pipes. Early runs scored up to 19 when the API answered in ~110ms, but scores swing widely with the API's latency. Watching a hosted model fly through it is the fun part.
+- **Reliably solved on one very easy level only:** [the easiest level you'll ever play](https://www.reddit.com/r/honk/comments/1tnt19h/the_easiest_level_youll_ever_play/), which has one pipe pair, a floor hazard and a short run to the finish. Custom levels with bullets or other moving obstacles haven't been tried.
 - **It depends on the game's internals.** `window.gameInstance` is not a public API. A Honk update can break the state reader at any time.
 - **Most of the smarts are in the plumbing.** The model makes the call, but the observation, prediction, targeting and timing code is what makes that call possible. That's the honest finding: a classifier this fast is usable in a control loop, but only if you design the loop around it.
 

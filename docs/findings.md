@@ -13,6 +13,7 @@ What we learned about OpenAI's Decisions API (`/v1/decisions`, `gpt-6-luna`, pub
 - [4. The control loop matters as much as the model](#4-the-control-loop-matters-as-much-as-the-model)
 - [5. Latency](#5-latency)
 - [6. Screenshots that flash](#6-screenshots-that-flash)
+- [7. Endless mode (in progress)](#7-endless-mode-in-progress)
 - [How we got there](#how-we-got-there)
 - [Not yet tested](#not-yet-tested)
 
@@ -84,6 +85,25 @@ Reading the game state over CDP takes ~4ms. A canvas screenshot takes ~40ms (raw
 
 Capturing with any in-browser scaling (a CDP `clip` with `scale` ≠ 1, or Playwright's `scale="css"`) made the visible page flash on every capture. We confirmed it with a phased test that ran one suspect at a time, labeled on screen. Capturing at scale 1 and shrinking in Python doesn't flash. The MP4 recorder also asks for full-size frames for the same reason.
 
+## 7. Endless mode (in progress)
+
+[Endless mode](https://www.reddit.com/r/honk/comments/1o7wahu/endless_mode/) is the real test, and the bot doesn't beat it yet. Best scores so far are 19 (at ~110ms per decision) and 10 (at ~150ms). Typical batches average 2-5, and scores fall toward 0 when latency climbs past ~250ms, which it did repeatedly during testing (one sequential check: median 362ms, server-side 258ms, nowhere near the rate limit).
+
+What the traces showed:
+
+- **Single, moving pipes.** Later in a run, endless spawns pipes with only a top or only a bottom half, many of them moving. The state reader has to accept either half and estimate how fast the gap is moving.
+- **The model's answers were right; the geometry was the problem.** Pipes are 297px apart, leaving ~45 frames of open air between them, while consecutive gaps can be 250-300px apart vertically. Switching to the next gap only once the pipe is 30px behind leaves ~30 frames, and flapping as fast as possible climbs only ~6px per frame. Runs die climbing too slowly or overshooting the bottom lip after a long fall.
+- **Latency bursts kill.** Several runs died with 8-12 answers still outstanding.
+
+Ideas built and kept behind flags, none yet shown to beat the default:
+
+| Flag | Idea | Result so far (8-10 runs, ~150ms) |
+|---|---|---|
+| `--lean 12 --pass-px 4` | Switch sooner and lean toward the next gap while still inside this one | mean 3.5, same as the default |
+| `--plan 3` | Ask about a short climb: moments A, B, C, each assuming a flap at the earlier ones, so one answer can chain flaps | mean 1.75-2.9, worse |
+
+The climb-plan wording matters too: one signed line per moment scored 20/20 offline, while a single run-on sentence left moment A soft near zero (p=0.44 at -3px).
+
 ## How we got there
 
 1. Synthetic benchmarks (`benchmarks/`): fast (~110-130ms), but it couldn't place a bird relative to a gap.
@@ -96,4 +116,4 @@ Capturing with any in-browser scaling (a CDP `clip` with `scale` ≠ 1, or Playw
 
 ## Not yet tested
 
-Only one very easy level has been tried. Tighter gaps, moving obstacles, bullets, clustered pipes and faster scroll speeds are all untested, and each one cuts the time available for a decision.
+Only one very easy level is solved, and endless mode is in progress (above). Custom levels with bullets or other moving obstacles, and endless mode's clustered pipes, are untested.
