@@ -27,7 +27,9 @@ FRAME_HOST = "webview.devvit.net"
 MODEL = "gpt-6-luna"
 LOOKAHEAD = 260      # px ahead of the goose that counts as "the obstacle coming up"
 TICK_S = 0.05        # start a new decision this often
-MAX_IN_FLIGHT = 3
+MAX_IN_FLIGHT = 3    # fresh (younger than ABANDON_S) requests allowed at once
+ABANDON_S = 0.25     # a request unanswered this long stops blocking new ones; its answer is ignored
+MAX_PENDING = 8      # hard ceiling including abandoned requests
 TAP_SETTLE_S = 0.06  # a tap needs a few frames before the game state reflects it
 
 VISION_Q = [{
@@ -229,7 +231,8 @@ async def run(mode: str, seconds: float, quiet: bool = False) -> dict:
         # Overlapping decisions: a new one every TICK_S with up to MAX_IN_FLIGHT pending, so a
         # single slow call (seen up to 1.5s) no longer freezes control. Only the freshest answer
         # acts, and answers observed before the last tap are dropped (they don't know about it).
-        in_flight: set[asyncio.Task] = set()
+        in_flight: dict[asyncio.Task, float] = {}  # task -> perf_counter when it was sent
+        abandoned = 0
         seen_obstacle = cleared = False
         trace: list[str] = []
         s = {}
@@ -237,12 +240,16 @@ async def run(mode: str, seconds: float, quiet: bool = False) -> dict:
         last_tap_at = 0.0  # perf_counter when the last tap was sent
 
         async def one(seq: int, s: dict, jpeg: bytes | None, t_obs: float) -> None:
-            nonlocal last_applied, last_tap_at, taps
+            nonlocal last_applied, last_tap_at, taps, abandoned
             flap, conf = await (decide_vision(jpeg) if jpeg is not None else decide_state(s))
             lat_dec.append(time.perf_counter() - t_obs)
             # Drop answers older than the newest applied one, and answers from frames read before
             # the last tap had registered: acting on those caused double flaps into the top pipe.
-            stale = seq <= last_applied or t_obs < last_tap_at + TAP_SETTLE_S
+            # Also drop answers that took longer than ABANDON_S: by then the frame they describe
+            # is old, and fresher requests have already been sent in their place.
+            too_old = time.perf_counter() - t_obs > ABANDON_S
+            abandoned += too_old
+            stale = seq <= last_applied or t_obs < last_tap_at + TAP_SETTLE_S or too_old
             if not stale:
                 last_applied = seq
                 if flap:
@@ -271,19 +278,23 @@ async def run(mode: str, seconds: float, quiet: bool = False) -> dict:
                 trace.append(f"END y={s['y']} vy={s['vy']} band={s['safeTop']}-{s['safeBottom']} "
                              f"dead={s['dead']} done={s['done']} unanswered={len(in_flight)}")
                 break
-            if len(in_flight) < MAX_IN_FLIGHT:
+            # Count only requests that are still young: when every request stalls at once (seen as
+            # ~350ms with no answer), abandoned ones must not block fresh questions.
+            fresh = sum(1 for sent in in_flight.values() if t0 - sent < ABANDON_S)
+            if fresh < MAX_IN_FLIGHT and len(in_flight) < MAX_PENDING:
                 task = asyncio.create_task(one(n, s, jpeg, t0))
-                in_flight.add(task)
-                task.add_done_callback(in_flight.discard)
+                in_flight[task] = t0
+                task.add_done_callback(lambda t: in_flight.pop(t, None))
             await asyncio.sleep(max(0.0, TICK_S - (time.perf_counter() - t0)))
-        for task in in_flight:
+        for task in list(in_flight):
             task.cancel()
         hud(f"{'LEVEL COMPLETE' if s.get('done') else 'crashed'} · {taps} taps")
         await asyncio.gather(*hud_tasks, return_exceptions=True)
-        result = {"trace": trace, "cleared_pipe": cleared, "completed": bool(s.get("done")), "taps": taps,
+        result = {"trace": trace, "abandoned": abandoned, "cleared_pipe": cleared, "completed": bool(s.get("done")), "taps": taps,
                   "decide_ms": round(statistics.median(lat_dec) * 1000) if lat_dec else None}
         print(f"{mode}: {n} ticks, {taps} taps, observe median {statistics.median(lat_obs)*1000:.0f}ms"
               + (f", decide median {result['decide_ms']}ms" if lat_dec else "")
+              + f" | late answers dropped: {abandoned}"
               + f" | cleared pipe: {cleared}, completed: {result['completed']}")
         return result
 

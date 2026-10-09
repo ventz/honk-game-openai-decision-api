@@ -3,16 +3,16 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)
 
-Can OpenAI's [Decisions API](https://developers.openai.com/api/docs/guides/decisions) play a reflex game? This bot plays [Honk](https://www.reddit.com/r/honk/), a Flappy Bird-style game that runs inside Reddit, by asking `/v1/decisions` a yes/no question several times a second and flapping on the answer. It completed the test level in 12 of 13 runs (10/10 in one batch), at about 105-115ms per decision.
+I connected OpenAI's [Decisions API](https://developers.openai.com/api/docs/guides/decisions) to my browser, reverse-engineered the internals of [Honk](https://www.reddit.com/r/honk/) (a Flappy Bird-style game that runs inside Reddit), and tuned the setup until the model could play it with real-time decisions. On the test level it now finishes **20 out of 20 runs**, at about **110ms per decision**.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Quick Install](#quick-install)
-- [Features](#features)
 - [Usage](#usage)
-- [How It Works](#how-it-works)
+- [The Geeky Bits](#the-geeky-bits)
 - [Results](#results)
+- [Limitations](#limitations)
 - [Documentation](#documentation)
 - [Fair Play](#fair-play)
 - [Contributing](#contributing)
@@ -20,15 +20,15 @@ Can OpenAI's [Decisions API](https://developers.openai.com/api/docs/guides/decis
 
 ## Overview
 
-The [Decisions API](https://developers.openai.com/api/docs/guides/decisions) (public beta, `gpt-6-luna`) returns typed answers (probabilities, a choice, a score) instead of generated text, and OpenAI pitches it as about 10x faster than the Responses API. This project tests that claim on a task where both speed and correctness matter: keeping a goose alive between pipes.
+This is a fun project, and a deliberately unfair test. The Decisions API (public beta, `gpt-6-luna`) is built for classification: routing tickets, flagging content, scoring things. It returns typed answers (a probability, a choice, a score) instead of text, and OpenAI pitches it as about 10x faster than the Responses API.
 
-The short version:
+A reflex game pushes that to the limit. The goose falls under gravity on every frame, a gap is only a few goose-heights tall, and an answer that arrives 300ms late is already wrong. So the question was simple: is a hosted model fast *and* reliable enough to fly a goose through pipes?
 
-- **It's fast enough.** A median of ~105ms per decision, so about 9 decisions a second.
-- **The question's wording decides whether it works.** Worded as an action ("flap if below, don't if above"), the answer came back inverted. Asked as a fact ("will the goose be below the middle of the gap?"), it was right every time.
-- **Screenshots didn't work.** From game screenshots it couldn't tell whether the goose was above or below the gap. Reading positions from the game and describing them in one sentence did work.
+It is, but only after three discoveries:
 
-The full write-up is in [docs/findings.md](docs/findings.md).
+- **Ask a fact, not an action.** Worded as an action ("flap if below, don't if above"), the model's answers came back *inverted*. Asked as a fact ("will the goose be below the middle of the gap?"), it was right every time.
+- **Predict the future.** By the time an answer comes back, the goose has moved. The bot asks about where the goose *will be* when the tap lands, not where it is now.
+- **Never wait on one slow answer.** Several questions are always in flight, and late answers are thrown away.
 
 ## Quick Install
 
@@ -43,68 +43,88 @@ open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$H
 
 The last line opens a separate Chrome window with its own profile, which the bot attaches to. Chrome doesn't allow remote debugging on your everyday profile, so your normal browser is never touched. On Linux, run `google-chrome` with the same flags.
 
-## Features
-
-- **Two ways to observe the game.** `state` reads the goose's and the obstacles' positions from the running game. `vision` sends canvas screenshots instead.
-- **Typed answers.** Each tick asks a factual predicate or choice and flaps in code on the answer. The model never sees an action rule.
-- **Built for latency.** Up to 3 requests in flight, a warm-up request, a prediction of where the goose will be when the tap lands, and a settle window after each tap.
-- **On-page banner.** Shows that OpenAI Decisions is driving, with each decision, its probability and its latency.
-- **Repeatable runs.** `--runs N` plays N runs back to back, restarts after each death or win, prints a success rate, and saves a per-tick trace for every failed run to `logs/`.
-- **MP4 recording.** `--record` records the tab with Chrome's screencast and encodes it with ffmpeg. No OS screen-recording permission is needed.
-- **Synthetic benchmarks.** `benchmarks/` measures latency and accuracy on generated frames, with no game needed.
-
 ## Usage
 
 1. In the debug Chrome window, log in to Reddit. In our testing the level stuck at 90% loading while logged out, and Reddit may show a reCAPTCHA first.
-2. Open a Honk level, such as [the easiest level you'll ever play](https://www.reddit.com/r/honk/comments/1tnt19h/the_easiest_level_youll_ever_play/), and press **PLAY** so the game opens in its pop-out window.
+2. Open [the easiest level you'll ever play](https://www.reddit.com/r/honk/comments/1tnt19h/the_easiest_level_youll_ever_play/) and press **PLAY** so the game opens in its pop-out window.
 3. Run the bot:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 
 uv run honk_bot.py state                           # one run, prints every decision
-uv run honk_bot.py state --runs 10                 # success rate over 10 runs
+uv run honk_bot.py state --runs 20                 # success rate over 20 runs
 uv run honk_bot.py state --runs 3 --record videos/demo.mp4
 uv run honk_bot.py vision --runs 10                # screenshots instead of game state
 uv run honk_bot.py capture --seconds 5             # save frames to ./frames, no input
 ```
 
-The default Chrome address is `http://127.0.0.1:9222`; set `HONK_CDP_URL` to change it. Recording needs `ffmpeg` on your `PATH`.
+While it plays, a banner across the top of the page shows that OpenAI Decisions is driving, along with each decision, its probability and its latency. A failed run saves a per-tick trace to `logs/`. `--record` saves an MP4 of the tab using Chrome's screencast and `ffmpeg`, with no OS screen-recording permission needed. To use a different Chrome address than `http://127.0.0.1:9222`, set `HONK_CDP_URL`.
 
-The synthetic benchmarks need only the API key:
+The synthetic benchmarks in `benchmarks/` need only the API key: `uv run benchmarks/synthetic_flappy.py`.
 
-```bash
-uv run benchmarks/synthetic_flappy.py
-uv run benchmarks/synthetic_sidescroller.py
-```
-
-## How It Works
+## The Geeky Bits
 
 ```mermaid
 flowchart LR
-    A[Read game state<br/>over CDP, ~4ms] --> B[Predict goose position<br/>when a tap would land]
-    B --> C["Describe in words:<br/>'40 pixels below the middle of the gap'"]
-    C --> D["/v1/decisions<br/>predicate: will it be below the middle?"]
-    D -->|p ≥ 0.5, not stale| E[Tap the canvas]
+    A[Read game state<br/>from the live game, ~4ms] --> B[Physics: where will the goose be<br/>when a tap sent now lands?]
+    B --> C["Describe it:<br/>'40 pixels below the middle of the gap'"]
+    C --> D["/v1/decisions, gpt-6-luna<br/>predicate: will it be below the middle?"]
+    D -->|"p ≥ 0.5, fresh answer"| E[Tap the canvas]
     D -->|otherwise| A
     E --> A
 ```
 
-- **Observing.** Playwright attaches to Chrome over the DevTools protocol, finds the game's `devvit.net` iframe, and reads the goose's hitbox, velocity and the nearby dangerous objects straight from the running game.
-- **Targeting.** From the obstacles ahead it finds the open vertical band closest to the goose and aims for its middle.
-- **Deciding.** The model is asked a fact. The code turns the answer into a tap, and drops answers that are older than the newest one used or that come from a frame read before the last tap had registered.
+**Getting inside the game.** Honk is a [Devvit](https://developers.reddit.com/) app: a web app Reddit hosts in an iframe on `*.webview.devvit.net`. The bot attaches to Chrome over the DevTools protocol (Playwright's `connect_over_cdp`) and finds that iframe. One snag: frames of a page that was already open report blank URLs over CDP, so the bot asks each frame for its own `location.host`. Inside, the game turned out to be a PixiJS canvas that exposes its whole state as `window.gameInstance`: the goose's hitbox, velocity and death flag, plus the level's obstacles, gravity, scroll speed and finish line. Reading all of that takes about 4ms, against ~40-80ms for a screenshot.
+
+**Finding the gap.** Custom levels are built from arbitrary objects, not just pipe pairs, so the bot gathers every dangerous object within 260px ahead and computes the open vertical bands between them. It aims for the middle of the band nearest the goose.
+
+**Predicting ahead.** A decision takes about 110ms, roughly 7 frames at 60fps. During that time the goose keeps falling, so the bot runs the level's own physics forward (gravity 0.4 px/frame²):
+
+```
+y_when_tap_lands = y + vy·t + ½·g·t²     (t = 7 frames)
+```
+
+The model is asked about that predicted position, not the current one. Without the prediction, its answers described the past.
+
+**The question is the program.** The model is asked one factual predicate, "Will the goose be below the middle of the gap?", given a single sentence such as "The goose will be 40 pixels below the middle of the gap." The code taps when the probability is at least 0.5. Getting here took several attempts:
+
+| Wording | Outcome |
+|---|---|
+| Raw screen coordinates and velocities | wrong in both directions |
+| Natural units (height, climb rate), safe band, predicted height | still wrong |
+| "Flap if it will be below the middle; do not flap if above" | **inverted**: p=0.99 to flap at "40 pixels above" |
+| "Will the goose be below the middle of the gap?" | p=1.00 / 0.00, correct every time |
+
+**Racing the latency.** A new question goes out every 50ms, with up to 3 fresh ones in flight. Only the newest answer acts. Three rules throw answers away:
+
+- Older than an answer already acted on.
+- Based on a frame read within 60ms after a tap, before the tap had registered. Acting on those caused double flaps into the top pipe.
+- Took longer than 250ms. A request that slow also stops counting toward the 3-in-flight limit, so a burst of slow responses can't stop new questions going out. This fix took the bot from 12/13 to 20/20.
+
+The first call on a cold HTTPS connection took ~750ms, long enough to die, so the bot sends a warm-up request before the first tap.
+
+**A bug that made the screen flash.** Screenshots captured at reduced scale inside Chrome (a CDP `clip` with `scale` ≠ 1, or Playwright's `scale="css"`) made the page visibly flash on every capture. A labeled, phase-by-phase test isolated it. The fix is to capture at scale 1 and shrink the image in Python.
 
 ## Results
 
-Measured on 2026-10-08 on one level, 10 runs per setup:
+Measured on 2026-10-08, all on one level:
 
 | Setup | Completed | Median decision |
 |---|---|---|
-| Game state as text + factual question + tap-settle fix | **10/10**, then 2/3 in a later check | 105-115ms |
-| Same, without the tap-settle fix | 7/10 | 125ms |
+| Game state + factual question + tap settle + stall handling | **20/20** | 110ms |
+| Same, without stall handling | 12/13 | 105-115ms |
+| Same, without the tap settle | 7/10 | 125ms |
+| Earlier wordings (raw numbers, action rules) | 0/7 | ~120ms |
 | Screenshots (360px) + factual `above`/`below` choice | 0/10 | ~280ms |
 
-The one failure with the final setup was a latency stall: every in-flight request was slow at once, and no answer arrived for about 350ms while the goose fell. The details, including the inverted-answer test and a screenshot flashing bug, are in [docs/findings.md](docs/findings.md).
+From screenshots, the model couldn't judge fine vertical alignment. It answered "above" on every frame and never flapped. The full write-up is in [docs/findings.md](docs/findings.md).
+
+## Limitations
+
+- **Tested on one, very easy level only:** [the easiest level you'll ever play](https://www.reddit.com/r/honk/comments/1tnt19h/the_easiest_level_youll_ever_play/), which has one pipe pair, a floor hazard and a short run to the finish. Harder levels with tighter gaps, moving obstacles or bullets haven't been tried.
+- **It depends on the game's internals.** `window.gameInstance` is not a public API. A Honk update can break the state reader at any time.
+- **Most of the smarts are in the plumbing.** The model makes the call, but the observation, prediction, targeting and timing code is what makes that call possible. That's the honest finding: a classifier this fast is usable in a control loop, but only if you design the loop around it.
 
 ## Documentation
 
@@ -117,7 +137,7 @@ This is an experiment in model latency and reliability, not a way to farm a lead
 
 ## Contributing
 
-Issues and pull requests are welcome. Ideas worth trying: a fallback for latency stalls, other levels, other question wordings, and whether the vision mode improves with annotated frames.
+Issues and pull requests are welcome. Ideas worth trying: harder levels, other question wordings, and whether the vision mode gets better with annotated frames.
 
 ## License
 

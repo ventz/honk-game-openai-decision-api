@@ -2,7 +2,7 @@
 
 What we learned about OpenAI's Decisions API (`/v1/decisions`, `gpt-6-luna`, public beta) by using it to play Honk.
 
-> These come from one small project: one level, 10 runs per setup, measured on 2026-10-08. Treat them as hypotheses to check on your own task, not as settled rules.
+> These come from one small project: one deliberately easy level ([the easiest level you'll ever play](https://www.reddit.com/r/honk/comments/1tnt19h/the_easiest_level_youll_ever_play/)), 10-20 runs per setup, measured on 2026-10-08. Treat them as hypotheses to check on your own task, not as settled rules.
 
 ## Contents
 
@@ -14,6 +14,7 @@ What we learned about OpenAI's Decisions API (`/v1/decisions`, `gpt-6-luna`, pub
 - [5. Latency](#5-latency)
 - [6. Screenshots that flash](#6-screenshots-that-flash)
 - [How we got there](#how-we-got-there)
+- [Not yet tested](#not-yet-tested)
 
 ## Results
 
@@ -21,7 +22,8 @@ The level is "the easiest level you'll ever play" on r/honk: one pipe pair, a ha
 
 | Setup | Completed the level | Median decision time |
 |---|---|---|
-| Game state as text, factual question, tap-settle fix | **10/10**, then 2/3 in a later check | 105-115ms |
+| Game state as text, factual question, tap settle, stall handling | **20/20** | 110ms |
+| Same, without stall handling | 12/13 (10/10, then 2/3) | 105-115ms |
 | Game state as text, factual question, no tap-settle fix | 7/10 | 125ms |
 | Screenshots (360px), factual `above`/`below` choice | 0/10 | ~280ms |
 | Game state as text, earlier framings (raw numbers, action rules) | 0/7 single runs, each a different framing | ~120ms |
@@ -59,7 +61,7 @@ With live 360px game screenshots and the same factual `above`/`below` question, 
 
 With the factual question, every answer in the failed runs was right (p=1.00 or 0.00). All 3 failures out of 10 were double flaps: the bot acted on a frame read before its previous tap had registered, flapped twice, and flew into the top pipe. Dropping any decision based on a frame read less than 60ms after the last tap (`TAP_SETTLE_S`) took the success rate from 7/10 to 10/10.
 
-The one failure after that fix was not a wrong answer. Every request in flight was slow at once, so no answer arrived for about 350ms while the goose fell from the middle of the gap into the bottom pipe. The model's last answer before the stall was correct. The bot has no fallback when every answer is late; adding one would make it more reliable, but the code rather than the model would be making that call. The final `END` line of each failure trace in `logs/` now records how many requests were still unanswered.
+The one failure after that fix was not a wrong answer. Every request in flight was slow at once, so no answer arrived for about 350ms while the goose fell from the middle of the gap into the bottom pipe. The model's last answer before the stall was correct. The fix keeps the model in charge rather than adding a code fallback. A request with no answer after 250ms (`ABANDON_S`) stops counting toward the 3-in-flight limit, so fresh questions keep going out during a stall. Its answer is ignored if it arrives, because the frame it describes is old by then. A hard ceiling of 8 pending requests stops a flood. Over 20 runs, 10 late answers were dropped (0-2 per run), and all 20 runs completed. The final `END` line of each failure trace in `logs/` records how many requests were still unanswered.
 
 Other parts of the loop:
 
@@ -89,4 +91,9 @@ Capturing with any in-browser scaling (a CDP `clip` with `scale` ≠ 1, or Playw
 3. Live, game state as numbers: wrong flaps in both directions.
 4. Live, game state as one sentence with an action rule: still wrong. The offline polarity test exposed the inversion.
 5. Factual predicate: 7/10.
-6. Tap-settle fix: 10/10.
+6. Tap-settle fix: 10/10, then 2/3 when every request stalled at once.
+7. Stall handling: 20/20.
+
+## Not yet tested
+
+Only one very easy level has been tried. Tighter gaps, moving obstacles, bullets, clustered pipes and faster scroll speeds are all untested, and each one cuts the time available for a decision.
