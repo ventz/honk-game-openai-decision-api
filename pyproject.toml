@@ -1,0 +1,12 @@
+[project]
+name = "honk-game-openai-decision-api"
+version = "0.1.0"
+description = "Play Reddit's Honk (a Flappy Bird-style Devvit game) with OpenAI's Decisions API"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "openai>=3.26.0",
+    "pillow>=12.3.0",
+    "playwright>=1.63.0",
+]

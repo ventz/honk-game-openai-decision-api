@@ -1,0 +1,30 @@
+# Local / private
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.claude/
+.mcp.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+private/
+.private/
+sessions/
+.sessions/
+*.session
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Run output
+frames/
+logs/
+videos/
+*.mp4
+*.mov
