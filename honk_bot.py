@@ -26,7 +26,8 @@ CDP_URL = os.environ.get("HONK_CDP_URL", "http://127.0.0.1:9222")
 FRAME_HOST = "webview.devvit.net"
 MODEL = "gpt-6-luna"
 LOOKAHEAD = 260      # px ahead of the goose that counts as "the obstacle coming up"
-FLAP_RISE = 52       # px a flap lifts the goose (median of 61 flaps measured from run traces)
+FLAP_RISE = 56       # px a flap lifts the goose: 61 from a standstill, ~56 when it flaps while
+                     # falling slowly (the physics model below; 52 measured from coarser traces)
 AIM_BIAS = 10        # px above center: late flaps (falling out the bottom) are the commoner death
 AIM = -1.0           # fixed aim as a fraction of the safe band (0 top, 1 bottom); < 0 = derive from FLAP_RISE
 PASS_PX = 30         # keep watching a pipe until it is this far behind the goose (--pass-px 4
@@ -131,7 +132,7 @@ STATE_JS = """([look, RISE, PASS_PX, BIAS, AIM, LEAN]) => {
     }
   }
   return {H: Math.round(H), y: Math.round(gy), vy: +g.bird.velocity.toFixed(2), target: Math.round(target), safeTop: Math.round(band[0] + h / 2), safeBottom: Math.round(band[1] - h / 2), n: obs.length, gapId: gapId,
-          score: g.pipeHandler.score, endless: !(c && c.isCustomLevel),
+          score: g.pipeHandler.score, scale: g.scale, endless: !(c && c.isCustomLevel),
           started: g.gameStarted, over: g.gameOver, dead: g.bird.isDead,
           done: !!(c && c.levelCompleted), loading: g.isLoading};
 }"""
@@ -201,16 +202,27 @@ async def decide_vision(jpeg: bytes) -> tuple[bool, float]:
     return a.choice == "below", a.confidence
 
 
-GRAVITY = 0.4        # px/frame^2, from the level data
+# The game's physics, measured frame by frame (a fall predicted 413.16 against 413.24 actual over
+# 23 frames; the earlier y + v*t + g*t^2/2 was 59px short). Physics runs at a fixed 60Hz in game
+# units, drawn at `scale` (~1.586) screen px per unit, and bird.velocity is in game units:
+#   y += scale * v;  v = min(MAX_V, DRAG * (v + GRAVITY));  a flap sets v = FLAP_V before that step.
+GRAVITY = 0.4
+DRAG = 0.98
+MAX_V = 10.0
+FLAP_V = -6.3
 FPS = 60
-FAST_FALL = 6.0       # px/frame; beyond this, predict one extra tick ahead
+FAST_FALL = 6.0       # game units/frame (~9.5 screen px); beyond this, predict one extra tick ahead
 MAX_GAP_SPEED = 3.0   # px/frame cap on the estimated gap motion; larger values are target switches
 latency_frames = 7.0  # decision round-trip in frames; updated from measured latency during a run
 
 
 PLAN_SLOTS = 1        # moments asked about per request; > 1 turns each answer into a short climb plan
-SLOT_NAMES = "ABCDEF"
-FLAP_V = 6.4          # px/frame upward right after a flap: a flap sets the velocity, and v^2/2g = FLAP_RISE
+SLOT_NAMES = "ABCDEFGHIJ"
+# Latency-indexed moments (--lat-slots): ask where the goose will be if the tap lands after each of
+# these delays, then act on the one matching how long the answer actually took. A single latency
+# guess is wrong whenever latency jitters: a median skewed by slow answers flapped ~20px early.
+LAT_SLOTS_MS: list[int] = []
+LAT_SCHEDULE = True   # also schedule a tap for the first later moment that needs one
 PLAN_GAP = 8          # frames between the flaps of a climb plan (~133ms, under one decision round-trip)
 
 
@@ -221,7 +233,16 @@ def predict_y(s: dict, extra: float = 0.0) -> int:
     means the next chance comes ~3 frames later, ~30px at terminal speed.
     """
     t = latency_frames + extra + (TICK_S * FPS if s["vy"] > FAST_FALL else 0)
-    return round(s["y"] + s["vy"] * t + 0.5 * GRAVITY * t * t)
+    return round(fly(s, t)[0])
+
+
+def fly(s: dict, frames: float, flaps: tuple[int, ...] = ()) -> tuple[float, float]:
+    """(screen y, velocity) after `frames` physics frames, flapping at the given frame indexes."""
+    y, v, scale = s["y"], s["vy"], s.get("scale", 1.586)
+    for i in range(round(frames)):
+        y += scale * v
+        v = min(MAX_V, DRAG * ((FLAP_V if i in flaps else v) + GRAVITY))
+    return y, v
 
 
 def predict_target(s: dict, extra: float = 0.0) -> int:
@@ -246,20 +267,36 @@ def climb_offsets(s: dict) -> list[int]:
     about 3px of climb per frame. A plan lets one answer chain flaps every PLAN_GAP frames instead.
     Near the target it reduces to one flap, since the moment after a flap is already above it.
     """
-    y = predict_y(s)
-    offs = [round(y - predict_target(s))]
+    t = round(latency_frames)
+    offs = [predict_y(s) - predict_target(s)]
     for k in range(1, PLAN_SLOTS):
-        y += -FLAP_V * PLAN_GAP + 0.5 * GRAVITY * PLAN_GAP ** 2  # a flap sets the velocity
+        y = fly(s, t + k * PLAN_GAP, tuple(t + j * PLAN_GAP for j in range(k)))[0]
         offs.append(round(y - predict_target(s, k * PLAN_GAP)))
+    return offs
+
+
+def lat_offsets(s: dict) -> list[int]:
+    """Offset from the target (positive = below) if a tap lands after each LAT_SLOTS_MS delay."""
+    global latency_frames
+    saved, offs = latency_frames, []
+    for ms in LAT_SLOTS_MS:
+        latency_frames = ms / 1000 * FPS + 1
+        offs.append(predict_y(s) - predict_target(s))
+    latency_frames = saved
     return offs
 
 
 def describe(s: dict) -> str:
     """Where the goose will be, relative to the target, when a tap sent now lands.
 
-    With PLAN_SLOTS > 1 it describes a short climb: see climb_offsets.
+    With PLAN_SLOTS > 1 it describes a short climb (see climb_offsets); with LAT_SLOTS_MS, the
+    same no-flap fall at several possible latencies (see lat_offsets).
     """
     # screen y grows downward: positive offset = below the target
+    if LAT_SLOTS_MS:
+        # 96/98 correct offline over 7 moments; both misses were one slot late at the zero crossing.
+        return "\n".join(f"Moment {SLOT_NAMES[k]}: goose height relative to target: {-o:+d} px (negative means below)."
+                         for k, o in enumerate(lat_offsets(s)))
     offs = [s["pred"] - s["tgt_pred"]] if PLAN_SLOTS == 1 else climb_offsets(s)
     if PLAN_SLOTS == 1:
         # Signed form scored a clean 1.00 / 0.00 even at 1px, slightly crisper than "N pixels below".
@@ -273,9 +310,10 @@ def describe(s: dict) -> str:
 
 async def decide_state(s: dict) -> list[float]:
     """Probability that the goose will be below the target, per planned moment."""
-    dec = await client.decisions.create(model=MODEL, input=s["text"], questions=plan_questions(PLAN_SLOTS))
+    qs = plan_questions(len(LAT_SLOTS_MS) or PLAN_SLOTS)
+    dec = await client.decisions.create(model=MODEL, input=s["text"], questions=qs)
     by_name = {a.name: (0.0 if a.type == "refusal" else a.probability) for a in dec.answers}
-    names = [q["name"] for q in plan_questions(PLAN_SLOTS)]
+    names = [q["name"] for q in qs]
     return [by_name.get(n, 0.0) for n in names]
 
 
@@ -319,11 +357,17 @@ async def run(mode: str, seconds: float, quiet: bool = False) -> dict:
                 await asyncio.sleep(1.5)
             # Tap until the game reports a live run: endless mode's "TAP to Retry" screen sometimes
             # swallowed the start tap, leaving the goose hovering with nothing to decide.
+            # Hand over the moment the run is live: a fixed 0.4s wait here let the goose fall ~100px
+            # unattended, into the first pipe on the easy level (8/20 at ~185ms decisions).
+            live = False
             for _ in range(6):
                 await mouse.click(*tap_xy)
-                await asyncio.sleep(0.4)
-                st = await frame.evaluate("() => [gameInstance.gameStarted, gameInstance.gameOver]")
-                if st[0] and not st[1]:
+                for _ in range(8):
+                    await asyncio.sleep(0.05)
+                    st = await frame.evaluate("() => [gameInstance.gameStarted, gameInstance.gameOver]")
+                    if live := st[0] and not st[1]:
+                        break
+                if live:
                     break
                 await asyncio.sleep(0.8)
         end = time.perf_counter() + seconds
@@ -352,9 +396,11 @@ async def run(mode: str, seconds: float, quiet: bool = False) -> dict:
 
         async def tap() -> None:
             nonlocal taps, last_tap_at
-            await mouse.click(*tap_xy)
-            taps += 1
+            # Mark the tap before sending it: a click over CDP takes a moment, and an answer that
+            # arrived meanwhile still saw the old time, passed the settle check and double-flapped.
             last_tap_at = time.perf_counter()
+            taps += 1
+            await mouse.click(*tap_xy)
 
         async def planned_tap(seq: int, delay: float) -> None:
             nonlocal planned
@@ -374,10 +420,26 @@ async def run(mode: str, seconds: float, quiet: bool = False) -> dict:
             else:
                 probs = await decide_state(s)
                 flap, conf = probs[0] >= 0.5, probs[0]
-            lat_dec.append(time.perf_counter() - t_obs)
-            # Predict ahead by what decisions actually take right now, plus a frame for the tap.
+            elapsed = time.perf_counter() - t_obs
+            lat_dec.append(elapsed)
+            later = None  # (seconds from now) of the first later moment that needs a flap
+            if LAT_SLOTS_MS and jpeg is None:
+                # Act on the moment that matches how long this answer actually took. If that one
+                # doesn't need a flap, schedule one for the first later moment that does: during a
+                # burst of slow answers (seen at 270-670ms for half a second) the scheduled tap still
+                # lands on time, and any fresher answer replaces it.
+                k = min(range(len(LAT_SLOTS_MS)), key=lambda i: abs(LAT_SLOTS_MS[i] - elapsed * 1000))
+                for j in range(k + 1, len(LAT_SLOTS_MS)):
+                    if probs[j] >= 0.5:
+                        later = LAT_SLOTS_MS[j] / 1000 - elapsed
+                        break
+                flap, conf, probs = probs[k] >= 0.5, probs[k], [probs[k]]
+            # Predict ahead by what timely decisions take right now, plus a frame for the tap.
+            # Answers past ABANDON_S are never acted on, so they must not stretch the estimate.
             global latency_frames
-            latency_frames = statistics.median(lat_dec[-15:]) * FPS + 1
+            timely = [d for d in lat_dec[-20:] if d <= ABANDON_S]
+            if timely:
+                latency_frames = statistics.median(timely) * FPS + 1
             # Drop answers older than the newest applied one, and answers from frames read before
             # the last tap had registered: acting on those caused double flaps into the top pipe.
             # Also drop answers that took longer than ABANDON_S: by then the frame they describe
@@ -393,6 +455,10 @@ async def run(mode: str, seconds: float, quiet: bool = False) -> dict:
                 plan = None
             if not stale:
                 last_applied = seq
+                plan = None  # newer information replaces any scheduled flap
+                if not flap and later is not None and LAT_SCHEDULE:
+                    plan = (seq, time.perf_counter())
+                    asyncio.create_task(planned_tap(seq, later))
                 if flap:
                     await tap()
                     # Climb plan: keep flapping every PLAN_GAP frames while each moment is still
@@ -542,8 +608,17 @@ if __name__ == "__main__":
     ap.add_argument("--in-flight", type=int, help=f"fresh requests allowed at once (default {MAX_IN_FLIGHT})")
     ap.add_argument("--lean", type=int, help=f"px margin when leaning toward the next gap, < 0 disables (default {LEAN})")
     ap.add_argument("--pass-px", type=int, help=f"px past a pipe before switching to the next (default {PASS_PX})")
+    ap.add_argument("--endless", action="store_true",
+                    help="endless-mode preset: 10 latency-indexed moments with scheduled flaps, --abandon 0.3, --lean 12, --pass-px 4")
+    ap.add_argument("--abandon", type=float, help=f"seconds after which an answer is ignored (default {ABANDON_S})")
+    ap.add_argument("--no-schedule", action="store_true", help="with --lat-slots, act only on the moment matching the answer's latency")
+    ap.add_argument("--lat-slots", help="comma-separated tap delays in ms to ask about, e.g. 80,100,120,140,160,180,200")
     ap.add_argument("--plan", type=int, help="moments asked about per request (default 1); > 1 asks about a short climb of flaps")
     args = ap.parse_args()
+    if args.endless:
+        # Best endless setup so far (2026-10-09, ~140ms): scores 2,5,12,4,19,2,8,1, against 0,6,4,7,9,5,0,14
+        # acting only on the matching moment, and a mean of ~3 before the physics and tap-race fixes.
+        LAT_SLOTS_MS, ABANDON_S, LEAN, PASS_PX = list(range(80, 306, 25)), 0.3, 12, 4
     if args.aim is not None:
         AIM = args.aim
     if args.tick:
@@ -554,6 +629,12 @@ if __name__ == "__main__":
         LEAN = args.lean
     if args.pass_px is not None:
         PASS_PX = args.pass_px
+    if args.abandon:
+        ABANDON_S = args.abandon
+    if args.no_schedule:
+        LAT_SCHEDULE = False
+    if args.lat_slots:
+        LAT_SLOTS_MS = [int(x) for x in args.lat_slots.split(",")][:len(SLOT_NAMES)]
     if args.plan:
         PLAN_SLOTS = min(args.plan, len(SLOT_NAMES))
     if args.runs > 1 or args.record:
