@@ -5,6 +5,10 @@
 
 I connected OpenAI's [Decisions API](https://developers.openai.com/api/docs/guides/decisions) to my browser, reverse-engineered the internals of [Honk](https://www.reddit.com/r/honk/) (a Flappy Bird-style game that runs inside Reddit), and tuned the setup until the model could play it with real-time decisions. On the test level it finishes **20 out of 20 runs**, at about **110-150ms per decision**, and in endless mode it has flown through **23 pipes** on camera.
 
+[![The goose flying through endless mode at pipe 21, with the banner showing the model's decision: FLAP p=0.97, 201ms](docs/images/flying.jpg)](https://x.com/ventzpetkov/status/2109380287415345487)
+
+*The 23-pipe run, at 2x speed. Click the image to watch the video on X.*
+
 ## Table of Contents
 
 - [Overview](#overview)
